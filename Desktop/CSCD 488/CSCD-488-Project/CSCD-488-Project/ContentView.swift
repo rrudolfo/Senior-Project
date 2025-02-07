@@ -8,14 +8,11 @@
 import SwiftUI
 
 struct ContentView: View {
+    let auth = AuthService.shared
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        Button("TEST SERVER CONNECTION") {
+            auth.testServerConnection()
         }
-        .padding()
     }
 }
 
