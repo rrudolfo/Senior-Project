@@ -13,7 +13,7 @@ class AuthService {
     
     static let shared = AuthService()
     
-    let serverURL: String = "https://glitch.com/edit/#!/cscd-488-project"
+    let serverURL: String = "https://cscd-488-project.glitch.me"
     let testMethod: String = "/api/hello"
     
     func testServerConnection() {
