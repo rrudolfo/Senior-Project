@@ -4,6 +4,7 @@
 //
 //  Created by Jacob Lucas on 2/6/25.
 //
+//View is a protocol
 
 import SwiftUI
 
