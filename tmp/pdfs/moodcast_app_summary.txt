@@ -1,0 +1,50 @@
+MoodCast - App Summary (Repo-Based)
+
+What it is
+MoodCast is an iOS app that curates podcast episodes from Spotify based on user mood.
+It also captures route/ETE context and supports playback and favorites management.
+
+Who it is for
+Primary persona: commuters/drivers who want mood-aligned podcast picks for a drive.
+
+What it does
+- Creates accounts and signs users in with Firebase Authentication.
+- Stores user profile data and app state in Firestore.
+- Links a Spotify account via OAuth callback flow.
+- Generates an episode stack from a mood via backend Spotify search endpoints.
+- Supports swipe interactions to favorite or dismiss episode cards.
+- Lets users search saved/favorited episodes by name/description.
+- Provides playback controls (play, pause, seek, status) through backend API routes.
+
+How it works (architecture)
+Components/services
+- iOS SwiftUI client: views + view models (opening, deck, search, profile, account).
+- Client services: AuthService, DataService, SpotifyService.
+- Backend: Node.js Express server (`glitch_server/server.js`).
+- Data/auth: Firebase Auth + Firestore (`firebase-admin`, iOS Firebase SDK).
+- External content: Spotify Web API (`spotify-web-api-node`) and Spotify OAuth.
+- Optional ranking/filtering path: OpenAI call exists in server code, but is commented out.
+
+Data flow
+- User actions in SwiftUI call DataService/AuthService methods.
+- iOS app sends HTTP requests to `https://cscd-488-project.glitch.me`.
+- Backend reads/writes user docs and tokens in Firestore.
+- Backend calls Spotify APIs (refresh token when needed), returns JSON to iOS app.
+
+How to run (minimal getting started)
+1. Backend setup
+   - Go to `MoodCast_Final_Deliverables/glitch_server`.
+   - Install dependencies: `npm install`.
+   - Add `.env` values used in server code: `SPOTIFY_CLIENT_ID`,
+     `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_REDIRECT_URI`, `OPENAI_API_KEY`.
+   - Add Firebase service account JSON as `serviceAccountKey.json`.
+   - Start server: `npm start` (defaults to port 3000 unless `PORT` is set).
+2. iOS app setup
+   - Open `MoodCast_Final_Deliverables/MoodCast/MoodCast.xcodeproj` in Xcode.
+   - Ensure Firebase is configured (`GoogleService-Info.plist` present) and app URL type
+     matches Spotify redirect (example in README: `myapp://spotify/callback`).
+   - Build and run the app from Xcode.
+
+Not found in repo
+- A definitive production deployment recipe for the backend host.
+- A command-line iOS build/run script (Xcode GUI flow is implied).
