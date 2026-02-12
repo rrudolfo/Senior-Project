@@ -265,6 +265,86 @@ async function deleteDataFromFirestore(userId) {
   }
 }
 
+function tokenizeText(value) {
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3);
+}
+
+async function getUserDiscoverySignals(userId) {
+  if (!userId) {
+    return {
+      blockedEpisodeIds: [],
+      savedEpisodeIds: [],
+      favoriteEpisodeIds: [],
+      preferredTerms: [],
+    };
+  }
+
+  const userRef = db.collection("users").doc(userId);
+
+  try {
+    const [userDoc, savedEpisodesSnapshot, favoriteEpisodesSnapshot] =
+      await Promise.all([
+        userRef.get(),
+        userRef.collection("savedEpisodes").limit(200).get(),
+        userRef.collection("favoriteEpisodes").limit(200).get(),
+      ]);
+
+    const blockedEpisodeIds = userDoc.exists
+      ? userDoc.data()?.blocked_episode_ids || []
+      : [];
+
+    const savedEpisodes = savedEpisodesSnapshot.docs.map((doc) => doc.data());
+    const favoriteEpisodeIds = favoriteEpisodesSnapshot.docs.map(
+      (doc) => doc.id
+    );
+
+    const savedEpisodeIds = savedEpisodes
+      .map((episode) => episode?.id || episode?.episodeId)
+      .filter(Boolean);
+
+    const preferredTermsMap = new Map();
+    savedEpisodes.forEach((episode) => {
+      const terms = [
+        ...tokenizeText(episode?.name),
+        ...tokenizeText(episode?.description),
+        ...tokenizeText(episode?.show?.name),
+      ];
+
+      terms.forEach((term) => {
+        preferredTermsMap.set(term, (preferredTermsMap.get(term) || 0) + 1);
+      });
+    });
+
+    const preferredTerms = [...preferredTermsMap.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([term]) => term);
+
+    return {
+      blockedEpisodeIds,
+      savedEpisodeIds,
+      favoriteEpisodeIds,
+      preferredTerms,
+    };
+  } catch (error) {
+    console.error("Error loading discovery signals:", error.message);
+    return {
+      blockedEpisodeIds: [],
+      savedEpisodeIds: [],
+      favoriteEpisodeIds: [],
+      preferredTerms: [],
+    };
+  }
+}
+
 //EXPORT FUNCTIONS TO BE UTILIZED IN OTHER NODEJS FILES
 module.exports = {
   db,
@@ -276,5 +356,6 @@ module.exports = {
   getUserData,
   getUserTokens,
   savePlaybackState,
-  saveFavoriteEpisode
+  saveFavoriteEpisode,
+  getUserDiscoverySignals,
 };

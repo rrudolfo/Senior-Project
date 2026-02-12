@@ -69,25 +69,27 @@ app.get("/spotify/callback", async (req, res) => {
 });
 
 app.get("/podcasts/:mood/:userid", async (req, res) => {
-  //Infinite loop
   const { mood, userid } = req.params;
-  const { refreshToken, access_token } = await firestore.getUserTokens(userid);
-
-  spotify.spotifyApi.setRefreshToken(refreshToken);
-
-  // set token so spotify accepts ai call, donesn't return anything
-  try {
-    const data = await spotify.spotifyApi.clientCredentialsGrant();
-    spotify.spotifyApi.setAccessToken(data.body["access_token"]);
-  } catch (error) {
-    return res.status(500).json({ error: "Failed to initialize Spotify API." });
-  }
+  const eteMinutes = parseEteMinutes(req.query.eteMinutes);
 
   try {
-    const episodes = await getPodcastEpisodes(mood);
-    res.json(episodes);
+    const { refreshToken } = await firestore.getUserTokens(userid);
+    spotify.spotifyApi.setRefreshToken(refreshToken);
+
+    await ensureSpotifyClientToken();
+
+    const discoverySignals = await firestore.getUserDiscoverySignals(userid);
+
+    const episodes = await getPodcastEpisodes({
+      mood,
+      eteMinutes,
+      discoverySignals,
+    });
+
+    res.status(200).json(episodes);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error generating podcast episodes:", error);
+    res.status(500).json({ error: error.message || "Failed to load podcasts" });
   }
 });
 
@@ -854,98 +856,291 @@ function processPodcastResponse(response) {
   }));
 }
 /* --------------------------------------- TEST CODE --------------------------------------- */
-// PODCAST EPISODE FILTERING FUNCTIONS
-async function getPodcastEpisodes(mood) {
-  try {
-    let episodes = await searchPodcastEpisodes(mood);
-    // const openAIFilteredIds = await openAIFilter(episodes, mood);
-    //console.log("Filtered IDs:", openAIFilteredIds);
-
-    const filteredEpisodes = await Promise.all(
-      episodes.map(async (id) => {
-        const episode = await getPodcastEpisodeDetails(id);
-        return episode;
-      })
-    );
-
-    return filteredEpisodes;
-  } catch (error) {
-    console.error("Error in getPodcastEpisodes: ", error.message);
-    throw error;
-  }
-}
-
-async function getPodcastEpisodeDetails(episodeId) {
-  try {
-    const response = await spotify.spotifyApi.getEpisode(episodeId, {
-      market: "US",
-    });
-    const episode = response.body;
-    return episode;
-  } catch (error) {
-    console.error("Error in getPodcastEpisodeDetails: ", error.message);
-    if (error.statusCode === 403) {
-      console.error(
-        "Permission denied. Check token scopes or authentication method."
-      );
-    } else if (error.statusCode === 404) {
-      console.error("Episode not found. Verify the episode ID.");
-    }
-    throw error;
-  }
-}
-
-// RETURNS ARBITRARY PODCAST EPISODES: HELPER FUNC
-const searchPodcastEpisodes = async (query) => {
-  try {
-    const limit = 20;
-    const searchResults = await spotify.spotifyApi.search(query, ["episode"], {
-      limit,
-      market: "US",
-    });
-
-    const episodes = searchResults.body.episodes.items;
-    const episodeIds = episodes.map((ep) => ep.id); 
-    return episodeIds;
-  } catch (error) {
-    console.error("Error in searching podcast episodes: ", error);
-
-    if (error.body) {
-      console.error(
-        "Spotify API error response:",
-        JSON.stringify(error.body, null, 2)
-      );
-    }
-
-    throw error;
-  }
+const MOOD_QUERY_EXPANSIONS = {
+  happy: ["uplifting", "comedy", "feel good", "optimism", "funny", "positive"],
+  sad: ["comfort", "healing", "mindfulness", "mental health", "grief", "calm"],
+  angry: ["calm", "stoic", "decompression", "focus", "resilience"],
+  anxious: ["anxiety relief", "mindfulness", "breathing", "calm talk", "meditation"],
+  tired: ["light conversation", "storytelling", "gentle", "easy listening"],
+  focused: ["deep work", "productivity", "learning", "analysis", "business"],
+  excited: ["high energy", "trending", "sports talk", "tech news", "pop culture"],
+  scared: ["calming", "comfort", "mindfulness", "safety", "grounding"],
+  investing: ["markets", "stocks", "finance", "economy", "business news"],
+  motivation: ["self improvement", "discipline", "goals", "mindset", "success"],
+  nostalgia: ["retro", "throwback", "history", "classic stories", "memories"],
+  science: ["space", "physics", "biology", "technology", "research"],
+  calming: ["sleep", "relaxation", "meditation", "breathwork", "soft spoken"],
 };
 
-// RETURNS POCAST EPISODES BY LENGTH: HELPER FUNC
-// Will make this function optional if user chooses to use ete or not.
-function filterEpisodesByETE(episodes, eteMinutes) {
-  try {
-    let eteMs = eteMinutes * 60 * 1000; // Convert ETE to milliseconds
-    const incrementMs = 5 * 60 * 1000; // Increase by 5 minutes
-    const minMatches = 5;
-    const maxEteMs = 120 * 60 * 1000; // Max ETE of 2 hours
-
-    let filteredEpisodes = episodes.filter((ep) => ep.duration_ms <= eteMs);
-
-    while (filteredEpisodes.length < minMatches && eteMs < maxEteMs) {
-      eteMs += incrementMs;
-      filteredEpisodes = episodes.filter((ep) => ep.duration_ms <= eteMs);
-    }
-
-    if (filteredEpisodes.length === 0) {
-      throw new Error("No podcast episodes found in the max ETE limit.");
-    }
-
-    return filteredEpisodes;
-  } catch (error) {
-    console.error("Error in filtering podcasts by ETE: ", error);
-    throw error;
+function normalizeText(value) {
+  if (typeof value !== "string") {
+    return "";
   }
+
+  return value.toLowerCase();
+}
+
+function tokenize(value) {
+  return normalizeText(value)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3);
+}
+
+function parseEteMinutes(rawEteMinutes) {
+  const parsed = Number(rawEteMinutes);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return Math.min(parsed, 180);
+}
+
+function getMoodExpansionTerms(mood) {
+  const normalizedMood = normalizeText(mood).trim();
+  const moodTerms = MOOD_QUERY_EXPANSIONS[normalizedMood] || [];
+  const genericTerms = ["podcast", "episode"];
+  return [...new Set([normalizedMood, ...moodTerms, ...genericTerms])].filter(
+    Boolean
+  );
+}
+
+function buildDiscoveryQueries(mood, preferredTerms = []) {
+  const moodTerms = getMoodExpansionTerms(mood);
+  const preferred = preferredTerms.slice(0, 6);
+
+  const seededQueries = [
+    `${mood} podcast episode`,
+    ...moodTerms.slice(0, 6).map((term) => `${term} podcast episode`),
+    ...preferred.map((term) => `${mood} ${term} podcast`),
+    ...preferred.slice(0, 3).map((term) => `${term} interview podcast`),
+  ];
+
+  return [...new Set(seededQueries)].slice(0, 12);
+}
+
+async function ensureSpotifyClientToken() {
+  const data = await spotify.spotifyApi.clientCredentialsGrant();
+  spotify.spotifyApi.setAccessToken(data.body["access_token"]);
+}
+
+async function searchPodcastEpisodes(query, limit = 30) {
+  const searchResults = await spotify.spotifyApi.search(query, ["episode"], {
+    limit,
+    market: "US",
+  });
+
+  return searchResults?.body?.episodes?.items || [];
+}
+
+async function collectCandidateEpisodes(queries) {
+  const searchRuns = await Promise.allSettled(
+    queries.map((query) => searchPodcastEpisodes(query, 35))
+  );
+
+  const deduped = new Map();
+  for (const run of searchRuns) {
+    if (run.status !== "fulfilled") {
+      continue;
+    }
+
+    for (const episode of run.value) {
+      if (!episode?.id) {
+        continue;
+      }
+
+      if (!deduped.has(episode.id)) {
+        deduped.set(episode.id, episode);
+      }
+    }
+  }
+
+  return [...deduped.values()];
+}
+
+function buildEpisodeText(episode) {
+  return [
+    episode?.name,
+    episode?.description,
+    episode?.show?.name,
+    episode?.show?.publisher,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function getEpisodeDurationMinutes(episode) {
+  if (!episode?.duration_ms || !Number.isFinite(episode.duration_ms)) {
+    return null;
+  }
+
+  return episode.duration_ms / 60000;
+}
+
+function getDurationFitScore(episode, eteMinutes) {
+  if (!eteMinutes) {
+    return 0.5;
+  }
+
+  const durationMinutes = getEpisodeDurationMinutes(episode);
+  if (!durationMinutes) {
+    return 0.2;
+  }
+
+  const distance = Math.abs(durationMinutes - eteMinutes);
+  const tolerance = Math.max(8, eteMinutes * 0.4);
+  const score = 1 - distance / (tolerance * 2);
+  return Math.max(0, Math.min(1, score));
+}
+
+function getRecencyScore(episode) {
+  if (!episode?.release_date) {
+    return 0.25;
+  }
+
+  const releaseDate = new Date(episode.release_date);
+  if (Number.isNaN(releaseDate.getTime())) {
+    return 0.25;
+  }
+
+  const ageInDays =
+    (Date.now() - releaseDate.getTime()) / (1000 * 60 * 60 * 24);
+
+  if (ageInDays < 30) return 1;
+  if (ageInDays < 180) return 0.8;
+  if (ageInDays < 365) return 0.6;
+  if (ageInDays < 730) return 0.4;
+  return 0.2;
+}
+
+function shouldKeepEpisode(episode, excludedIds) {
+  if (!episode?.id || excludedIds.has(episode.id)) {
+    return false;
+  }
+
+  if (episode?.type && episode.type !== "episode") {
+    return false;
+  }
+
+  if (episode?.is_playable === false) {
+    return false;
+  }
+
+  return true;
+}
+
+function scoreEpisode(episode, context) {
+  const {
+    moodTermsSet,
+    preferredTermsSet,
+    preferredShowTermsSet,
+    eteMinutes,
+  } = context;
+
+  const combinedText = buildEpisodeText(episode);
+  const tokenSet = new Set(tokenize(combinedText));
+
+  let moodHits = 0;
+  for (const term of moodTermsSet) {
+    if (term.includes(" ")) {
+      if (normalizeText(combinedText).includes(term)) {
+        moodHits += 1;
+      }
+      continue;
+    }
+
+    if (tokenSet.has(term)) {
+      moodHits += 1;
+    }
+  }
+
+  let preferredHits = 0;
+  for (const term of preferredTermsSet) {
+    if (tokenSet.has(term)) {
+      preferredHits += 1;
+    }
+  }
+
+  const showName = normalizeText(episode?.show?.name || "");
+  let showAffinity = 0;
+  for (const term of preferredShowTermsSet) {
+    if (showName.includes(term)) {
+      showAffinity += 1;
+    }
+  }
+
+  const moodScore = Math.min(1, moodHits / Math.max(1, moodTermsSet.size));
+  const preferenceScore = Math.min(1, preferredHits / 6);
+  const showAffinityScore = Math.min(1, showAffinity / 2);
+  const durationFit = getDurationFitScore(episode, eteMinutes);
+  const recencyScore = getRecencyScore(episode);
+  const explicitPenalty = episode?.explicit ? 0.15 : 0;
+
+  const qualityScore =
+    (episode?.audio_preview_url ? 0.08 : 0) +
+    (episode?.language === "en" ? 0.05 : 0) +
+    (episode?.show?.publisher ? 0.04 : 0);
+
+  return (
+    moodScore * 0.42 +
+    durationFit * 0.24 +
+    preferenceScore * 0.14 +
+    showAffinityScore * 0.08 +
+    recencyScore * 0.1 +
+    qualityScore -
+    explicitPenalty
+  );
+}
+
+function rerankEpisodes(episodes, mood, eteMinutes, discoverySignals) {
+  const preferredTerms = discoverySignals?.preferredTerms || [];
+  const preferredShowTerms = preferredTerms.filter((term) => term.length >= 4);
+  const moodTermsSet = new Set(getMoodExpansionTerms(mood).flatMap(tokenize));
+
+  return episodes
+    .map((episode) => ({
+      episode,
+      score: scoreEpisode(episode, {
+        moodTermsSet,
+        preferredTermsSet: new Set(preferredTerms),
+        preferredShowTermsSet: new Set(preferredShowTerms),
+        eteMinutes,
+      }),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.episode);
+}
+
+async function getPodcastEpisodes({ mood, eteMinutes, discoverySignals }) {
+  const queries = buildDiscoveryQueries(mood, discoverySignals?.preferredTerms);
+  const candidateEpisodes = await collectCandidateEpisodes(queries);
+
+  const excludedIds = new Set([
+    ...(discoverySignals?.blockedEpisodeIds || []),
+    ...(discoverySignals?.savedEpisodeIds || []),
+    ...(discoverySignals?.favoriteEpisodeIds || []),
+  ]);
+
+  const filteredEpisodes = candidateEpisodes.filter((episode) =>
+    shouldKeepEpisode(episode, excludedIds)
+  );
+
+  const noExclusions = new Set();
+  const episodesToRank =
+    filteredEpisodes.length > 0
+      ? filteredEpisodes
+      : candidateEpisodes.filter((episode) =>
+          shouldKeepEpisode(episode, noExclusions)
+        );
+
+  const rerankedEpisodes = rerankEpisodes(
+    episodesToRank,
+    mood,
+    eteMinutes,
+    discoverySignals
+  );
+
+  return rerankedEpisodes.slice(0, 24);
 }
 
 const openAIFilter = async (podcastDetails, mood) => {

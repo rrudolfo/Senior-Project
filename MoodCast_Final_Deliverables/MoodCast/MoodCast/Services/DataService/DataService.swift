@@ -22,6 +22,7 @@ class DataService {
     let USER_REF = FIRESTORE_REF.collection("users")
     
     @AppStorage("user_id") var currentUserId: String?
+    @AppStorage("ete_minutes") var currentEteMinutes: Int = 0
     
     // MARK: FIRESTORE REQUESTS
     
@@ -371,8 +372,14 @@ class DataService {
         }
 
         let endpoint = "\(serverURL)/podcasts/\(mood)/\(userId)"
-        guard let components = URLComponents(string: endpoint) else {
+        guard var components = URLComponents(string: endpoint) else {
             throw APICallError.urlComponentsFailed
+        }
+        
+        if currentEteMinutes > 0 {
+            components.queryItems = [
+                URLQueryItem(name: "eteMinutes", value: String(currentEteMinutes))
+            ]
         }
 
         guard let url = components.url else {

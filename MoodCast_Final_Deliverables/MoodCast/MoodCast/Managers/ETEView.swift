@@ -21,6 +21,8 @@ struct ETEView: View {
     @Binding var showMapView: Bool
     @Binding var showEmojiSelection: Bool
     
+    @AppStorage("ete_minutes") private var eteMinutes: Int = 0
+    
     @Environment(\.colorScheme) var colorScheme
     
     private var hasRoute: Bool { route != nil }
@@ -162,6 +164,7 @@ extension ETEView {
                         .padding(.bottom, 8)
                     
                     Button {
+                        eteMinutes = travelMinutes
                         withAnimation { self.route = nil }
                         showMapView = false
                         showEmojiSelection = true
